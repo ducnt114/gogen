@@ -1,0 +1,3 @@
+# gogen
+
+go generator tool

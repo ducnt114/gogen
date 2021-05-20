@@ -1,0 +1,1 @@
+module "github.com/ducnt114/gogen"
