@@ -1,0 +1,9 @@
+package models
+
+import (
+	"github.com/jinzhu/gorm"
+)
+
+type {{ .ModelName}} struct {
+	{{ .FieldName}} {{ .FieldType}} `gorm:"column:{{ .ColumnName}}"`
+}
