@@ -1,14 +1,24 @@
 package cmd
 
 import (
-	"bufio"
 	"database/sql"
+	_ "embed"
 	"fmt"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"log"
 	"os"
 	"strings"
+	"text/template"
+)
+
+const (
+	schemaTable = "information_schema"
+
+	outputFolderModel   = "models"
+	outputFolderRepo    = "repositories"
+	outputFolderService = "services"
 )
 
 var genAPI = &cobra.Command{
@@ -18,107 +28,165 @@ var genAPI = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		zap.S().Info("Start command api")
 
+		g := &Generator{
+			DBUser:  dbUser,
+			DBPass:  dbPass,
+			DBHost:  dbHost,
+			DBPort:  dbPort,
+			DBName:  dbName,
+			DBTable: dbTable,
+
+			OutputFolder: outputFolder,
+		}
+		g.processGenerate(args)
 		zap.S().Info("Stop command api")
 	},
 }
 
-func GenerateProto(args []string) {
+type dbModel struct {
+	ModelName  string
+	TableName  string
+	Attributes []*dbModelAttribute
 
-	schemaTable := "information_schema"
+	NeedImport     bool
+	NeedImportTime bool
+	NeedImportGorm bool
+}
 
-	// example: root:pass@tcp(host:port)/database?param=value
-	dataSourceName := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", dbUser, dbPass, dbHost, dbPort, schemaTable)
+type dbModelAttribute struct {
+	FieldName    string
+	FieldType    string
+	ColumnName   string
+	IsPrimaryKey bool
+	IsNullable   bool
+}
+
+type Generator struct {
+	DBUser  string
+	DBPass  string
+	DBHost  string
+	DBPort  int32
+	DBName  string
+	DBTable string
+
+	OutputFolder string
+}
+
+func (g *Generator) processGenerate(args []string) {
+	// example: user:pass@tcp(host:port)/database?param=value
+	dataSourceName := fmt.Sprintf("%s:%s@tcp(%s:%v)/%s", g.DBUser, g.DBPass, g.DBHost, g.DBPort, schemaTable)
 	mysqlDB, err := sql.Open("mysql", dataSourceName)
 	if err != nil {
 		log.Fatal("Can not connect to mysql, detail: ", err)
 	}
+	defer func() {
+		err = mysqlDB.Close()
+		if err != nil {
+			zap.S().Error(err)
+		}
+	}()
 
-	defer mysqlDB.Close()
-
-	stmt, err := mysqlDB.Prepare("SELECT COLUMN_NAME, DATA_TYPE FROM COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME =?")
+	stmt, err := mysqlDB.Prepare("SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY FROM COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME =?")
 	if err != nil {
 		log.Println("Error when prepare query, detail: ", err)
 		return
 	}
 
-	rows, err := stmt.Query(dbName, dbTable)
+	rows, err := stmt.Query(g.DBName, g.DBTable)
 	if err != nil {
 		log.Println("Error when exec query, detail: ", err)
 		return
 	}
-
-	// open output file
-	fo, err := os.Create("") // TODO
-	if err != nil {
-		panic(err)
-	}
-	// close fo on exit and check for its returned error
-	defer func() {
-		if err := fo.Close(); err != nil {
-			log.Println("Error when exec query, detail: ", err)
-			return
-		}
-	}()
-	// make a write buffer
-	w := bufio.NewWriter(fo)
-
-	// write message name
-	if _, err := w.Write([]byte("syntax = \"proto3\";\n\n")); err != nil {
-		log.Println("Error when write data to file, detail: ", err)
-		return
+	m := &dbModel{
+		ModelName:  GetCamelCase(g.DBTable),
+		TableName:  g.DBTable,
+		Attributes: make([]*dbModelAttribute, 0),
 	}
 
-	if _, err := w.Write([]byte(fmt.Sprintf("message %s {\n", GetCamelCase(dbTable)))); err != nil {
-		log.Println("Error when write data to file, detail: ", err)
-		return
-	}
-
-	counter := 0
 	for rows.Next() {
-		var columnName, dataType string
-		err = rows.Scan(&columnName, &dataType)
+		var columnName, dataType, isNullable, columnKey string
+		err = rows.Scan(&columnName, &dataType, &isNullable, &columnKey)
 		if err != nil {
 			log.Println("Error when scan rows, detail: ", err)
 			return
 		}
-		//log.Println("ColumnName: ", columnName, ", DataType: ", dataType)
-		counter++
-		buf := []byte(fmt.Sprintf("\t%s %s = %d;\n", GetProtoDataType(dataType), columnName, counter))
-
-		// write a chunk
-		if _, err := w.Write(buf); err != nil {
-			log.Println("Error when write data to file, detail: ", err)
-			return
+		attr := &dbModelAttribute{
+			FieldName:  GetCamelCase(columnName),
+			FieldType:  GetGoDataType(dataType, isNullable),
+			ColumnName: columnName,
 		}
+		if columnKey == "PRI" {
+			attr.IsPrimaryKey = true
+		}
+		if isNullable == "YES" {
+			attr.IsNullable = true
+		}
+		if attr.FieldType == "time.Time" || attr.FieldType == "*time.Time" {
+			m.NeedImport = true
+			m.NeedImportTime = true
+		}
+		m.Attributes = append(m.Attributes, attr)
 	}
-
-	if _, err := w.Write([]byte("}\n")); err != nil {
-		log.Println("Error when write data to file, detail: ", err)
-		return
-	}
-
-	if err = w.Flush(); err != nil {
-		log.Println("Error when flush data to file, detail: ", err)
-		return
+	err = g.generateModel(m)
+	if err != nil {
+		zap.S().Error("Error when generateModel, detail: ", err)
 	}
 }
 
-func GetProtoDataType(mysqlType string) string {
+//go:embed templates/model.tmpl
+var modelTemplateContent string
+
+func (g *Generator) generateModel(m *dbModel) error {
+	tmpl, err := template.New("test_model").Parse(modelTemplateContent)
+	if err != nil {
+		return err
+	}
+
+	// open output file
+	fo, err := os.Create(fmt.Sprintf("./%v/%v/%v.go", g.OutputFolder, outputFolderModel, g.DBTable))
+	if err != nil {
+		return err
+	}
+	// close fo on exit and check for its returned error
+	defer func() {
+		if err := fo.Close(); err != nil {
+			zap.S().Error("Error when exec query, detail: ", err)
+			return
+		}
+	}()
+
+	err = tmpl.Execute(fo, m)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func GetGoDataType(mysqlType, isNullable string) string {
 	switch mysqlType {
 	case "varchar", "longtext", "text":
 		return "string"
-	case "smallint", "int", "bigint", "date", "datetime", "timestamp":
+	case "smallint", "int", "bigint", "timestamp":
 		return "int64"
 	case "tinyint":
 		return "bool"
 	case "decimal":
 		return "double"
+	case "date", "datetime":
+		if isNullable == "YES" {
+			return "*time.Time"
+		}
+		return "time.Time"
 	default:
 		return ""
 	}
 }
 
 func GetCamelCase(input string) string {
+	if input == "id" {
+		return "ID"
+	}
 	output := ""
 	capNext := true
 	for _, v := range input {

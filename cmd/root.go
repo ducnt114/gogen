@@ -13,15 +13,17 @@ var dbUser string
 var dbPass string
 var dbName string
 var dbTable string
+var outputFolder string
 
 func init() {
-	genAPI.Flags().StringVarP(&dbType, "type", "g", "mysql", "db type: mysql, postgres")
-	genAPI.Flags().StringVarP(&dbHost, "host", "o", "localhost", "db host")
-	genAPI.Flags().Int32VarP(&dbPort, "port", "p", 3306, "db port")
-	genAPI.Flags().StringVarP(&dbUser, "user", "u", "root", "db user")
-	genAPI.Flags().StringVarP(&dbPass, "pass", "w", "secret", "db pass")
-	genAPI.Flags().StringVarP(&dbName, "db", "d", "db_name", "db name")
-	genAPI.Flags().StringVarP(&dbTable, "table", "t", "table_name", "db name")
+	genAPI.Flags().StringVarP(&dbType, "type", "", "mysql", "db type: mysql, postgres")
+	genAPI.Flags().StringVarP(&dbHost, "host", "", "localhost", "db host")
+	genAPI.Flags().Int32VarP(&dbPort, "port", "", 3306, "db port")
+	genAPI.Flags().StringVarP(&dbUser, "user", "", "root", "db user")
+	genAPI.Flags().StringVarP(&dbPass, "pass", "", "secret", "db pass")
+	genAPI.Flags().StringVarP(&dbName, "db", "", "db_name", "db name")
+	genAPI.Flags().StringVarP(&dbTable, "table", "", "table_name", "db name")
+	genAPI.Flags().StringVarP(&outputFolder, "out", "", "output", "output folder")
 
 	rootCmd.AddCommand(genAPI)
 }
